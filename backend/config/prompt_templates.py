@@ -14,6 +14,9 @@ DEFAULT_PROMPT_TEMPLATE = """You are a cryptocurrency trading AI. Use the data b
 === CURRENT MARKET PRICES (USD) ===
 {prices_json}
 
+=== TECHNICAL ANALYSIS ===
+{technical_analysis}
+
 === LATEST CRYPTO NEWS SNIPPET ===
 {news_section}
 
@@ -60,6 +63,9 @@ Current prices (USD):
 
 === INTRADAY PRICE SERIES ===
 {sampling_data}
+
+=== TECHNICAL ANALYSIS ===
+{technical_analysis}
 
 === LATEST CRYPTO NEWS ===
 {news_section}
@@ -173,6 +179,9 @@ Current prices (USD):
 
 === INTRADAY PRICE SERIES ===
 {sampling_data}
+
+=== TECHNICAL ANALYSIS ===
+{technical_analysis}
 
 === LATEST CRYPTO NEWS ===
 {news_section}

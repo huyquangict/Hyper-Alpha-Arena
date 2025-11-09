@@ -19,6 +19,7 @@ from services.news_feed import fetch_latest_news
 from repositories.strategy_repo import set_last_trigger
 from services.system_logger import system_logger
 from repositories import prompt_repo
+from services.confluence_calculator import calculate_confluence_for_symbols, format_confluence_for_ai
 
 
 logger = logging.getLogger(__name__)
@@ -612,7 +613,7 @@ def _get_portfolio_data(db: Session, account: Account) -> Dict:
         Position.account_id == account.id,
         Position.market == "CRYPTO"
     ).all()
-    
+
     portfolio = {}
     for pos in positions:
         if float(pos.quantity) > 0:
@@ -621,13 +622,63 @@ def _get_portfolio_data(db: Session, account: Account) -> Dict:
                 "avg_cost": float(pos.avg_cost),
                 "current_value": float(pos.quantity) * float(pos.avg_cost)
             }
-    
+
     return {
         "cash": float(account.current_cash),
         "frozen_cash": float(account.frozen_cash),
         "positions": portfolio,
         "total_assets": float(account.current_cash) + calc_positions_value(db, account.id)
     }
+
+
+def _build_technical_analysis(
+    symbols: List[str],
+    history: Dict[str, Any]
+) -> str:
+    """
+    Build technical analysis section from price history
+
+    Args:
+        symbols: List of symbols to analyze
+        history: Price history dict (symbol -> DataFrame or list of candles)
+
+    Returns:
+        Formatted technical analysis string for AI prompt
+    """
+    try:
+        import pandas as pd
+
+        # Convert history to DataFrame format if needed
+        history_dfs = {}
+        for symbol, data in history.items():
+            if symbol not in symbols:
+                continue
+
+            if isinstance(data, pd.DataFrame):
+                history_dfs[symbol] = data
+            elif isinstance(data, list):
+                # Convert list of candles to DataFrame
+                df = pd.DataFrame(data)
+                if not df.empty and 'Date' in df.columns:
+                    history_dfs[symbol] = df
+
+        if not history_dfs:
+            return "Technical analysis unavailable (insufficient historical data)."
+
+        # Calculate confluence for symbols
+        symbol_signals = calculate_confluence_for_symbols(symbols, history_dfs)
+
+        if not symbol_signals:
+            return "Technical analysis unavailable (indicators could not be calculated)."
+
+        # Format for AI prompt
+        technical_analysis = format_confluence_for_ai(symbol_signals)
+
+        return technical_analysis
+
+    except Exception as e:
+        logger.error(f"Error building technical analysis: {e}", exc_info=True)
+        return f"Technical analysis unavailable (error: {str(e)})."
 
 
 def build_chat_completion_endpoints(base_url: str, model: Optional[str] = None) -> List[str]:
@@ -763,6 +814,43 @@ def call_ai_for_decision(
         # New multi-symbol approach
         from services.sampling_pool import sampling_pool
         sampling_data = _build_multi_symbol_sampling_data(symbols, sampling_pool)
+
+        # Build technical analysis from sampling pool history
+        try:
+            import pandas as pd
+            history_for_ta = {}
+            for symbol in symbols:
+                samples_list = sampling_pool.get_samples(symbol)
+                if samples_list and len(samples_list) >= 14:  # Minimum for ATR
+                    # Convert samples to DataFrame
+                    df_data = []
+                    for sample in samples_list:
+                        # Sampling pool stores simple price samples
+                        # For full OHLCV, we'd need more data
+                        # For now, use price as Close and estimate OHLC
+                        price = sample.get('price', 0)
+                        df_data.append({
+                            'Date': sample.get('datetime', datetime.now()),
+                            'Open': price,
+                            'High': price * 1.01,  # Estimate
+                            'Low': price * 0.99,   # Estimate
+                            'Close': price,
+                            'Volume': 1000  # Placeholder
+                        })
+
+                    if df_data:
+                        df = pd.DataFrame(df_data)
+                        df['Date'] = pd.to_datetime(df['Date'])
+                        history_for_ta[symbol] = df
+
+            if history_for_ta:
+                technical_analysis = _build_technical_analysis(symbols, history_for_ta)
+            else:
+                technical_analysis = "Technical analysis unavailable (insufficient price history)."
+        except Exception as e:
+            logger.error(f"Error building technical analysis: {e}", exc_info=True)
+            technical_analysis = "Technical analysis unavailable."
+
         context = _build_prompt_context(
             account,
             portfolio,
@@ -775,6 +863,7 @@ def call_ai_for_decision(
             symbol_order=symbol_order,
         )
         context["sampling_data"] = sampling_data
+        context["technical_analysis"] = technical_analysis
     else:
         # Legacy single-symbol approach (backward compatibility)
         context = _build_prompt_context(
@@ -788,6 +877,8 @@ def call_ai_for_decision(
             symbol_metadata=active_symbol_metadata,
             symbol_order=symbol_order,
         )
+        # No technical analysis for legacy mode
+        context["technical_analysis"] = "Technical analysis unavailable (legacy mode)."
 
     try:
         prompt = template.template_text.format_map(SafeDict(context))
